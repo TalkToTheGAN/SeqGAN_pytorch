@@ -29,10 +29,11 @@ print(opt)
 
 # Basic Training Parameters
 # general
-THC_CACHING_ALLOCATOR=0
+THC_CACHING_ALLOCATOR = 0
 SEED = 88
 BATCH_SIZE = 64
 GENERATED_NUM = 10000
+GRADIENT_ESTIMATOR = 'REINFORCE' # 'REINFORCE' or 'RELAX' 
 # related to data
 POSITIVE_FILE = 'real.data'
 NEGATIVE_FILE = 'gene.data'
@@ -58,6 +59,7 @@ print(opt.cuda)
 g_emb_dim = 32
 g_hidden_dim = 32
 g_sequence_len = 20
+n_samples = 2 # controls the precision of the probability distribution at the output of the Generator
 
 # Discriminator Parameters
 d_emb_dim = 64
@@ -65,7 +67,6 @@ d_filter_sizes = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20]
 d_num_filters = [100, 200, 200, 200, 200, 100, 100, 100, 100, 100, 160, 160]
 d_dropout = 0.75
 d_num_class = 2
-
 
 
 def generate_samples(model, batch_size, generated_num, output_file):
@@ -186,7 +187,7 @@ def main():
     print('Generating data ...')
     generate_samples(target_lstm, BATCH_SIZE, GENERATED_NUM, POSITIVE_FILE)
     
-    # Load data from file
+    # Load real data from file
     gen_data_iter = GenDataIter(POSITIVE_FILE, BATCH_SIZE)
 
     # Pretrain Generator using MLE
@@ -217,13 +218,14 @@ def main():
             print('Epoch [%d], loss: %f' % (epoch, loss))
 
     # Adversarial Training 
-    rollout = Rollout(generator, UPDATE_RATE)
     print('#####################################################')
     print('Start Adeversatial Training...\n')
-    gen_gan_loss = GANLoss()
+    if GRADIENT_ESTIMATOR == 'REINFORCE':
+        rollout = Rollout(generator, UPDATE_RATE)
+        gen_gan_loss = GANLoss()
+        if opt.cuda:
+            gen_gan_loss = gen_gan_loss.cuda()
     gen_gan_optm = optim.Adam(generator.parameters())
-    if opt.cuda:
-        gen_gan_loss = gen_gan_loss.cuda()
     gen_criterion = nn.NLLLoss(size_average=False)
     if opt.cuda:
         gen_criterion = gen_criterion.cuda()
@@ -234,46 +236,55 @@ def main():
     for total_batch in range(TOTAL_BATCH):
         ## Train the generator for one step
         for it in range(G_STEPS):
-            samples = generator.sample(BATCH_SIZE, g_sequence_len)
-            # construct the input to the generator, add zeros before samples and delete the last column
-            zeros = torch.zeros((BATCH_SIZE, 1)).type(torch.LongTensor)
-            if samples.is_cuda:
-                zeros = zeros.cuda()
-            inputs = Variable(torch.cat([zeros, samples.data], dim = 1)[:, :-1].contiguous())
-            targets = Variable(samples.data).contiguous().view((-1,))
-            #print(targets)
-            # calculate the reward
-            rewards = rollout.get_reward(samples, 16, discriminator)
-            rewards = Variable(torch.Tensor(rewards))
-            if opt.cuda:
-                rewards = torch.exp(rewards.cuda()).contiguous().view((-1,))
-            prob = generator.forward(inputs)
 
-            # 3.a
-            theta_prime = g_output_prob(prob, BATCH_SIZE, g_sequence_len)
+            if GRADIENT_ESTIMATOR == 'REINFORCE':
+                samples = generator.sample(BATCH_SIZE, g_sequence_len)
+                # construct the input to the generator, add zeros before samples and delete the last column
+                zeros = torch.zeros((BATCH_SIZE, 1)).type(torch.LongTensor)
+                if samples.is_cuda:
+                    zeros = zeros.cuda()
+                inputs = Variable(torch.cat([zeros, samples.data], dim = 1)[:, :-1].contiguous())
+                targets = Variable(samples.data).contiguous().view((-1,))
+                # calculate the reward
+                rewards = rollout.get_reward(samples, 16, discriminator)
+                rewards = Variable(torch.Tensor(rewards))
+                if opt.cuda:
+                    rewards = torch.exp(rewards.cuda()).contiguous().view((-1,))
+                prob = generator.forward(inputs)
+                loss = gen_gan_loss(prob, targets, rewards)
+                gen_gan_optm.zero_grad()
+                loss.backward()
+                gen_gan_optm.step()
 
-            # 3.b
-            z = gumbel_softmax(theta_prime, VOCAB_SIZE, opt.cuda)
-            #print(z)
-
-            # 3.c
-            value, b = torch.max(z, 0)
-
-            # 3.d
-            z_tilde = categorical_re_param(theta_prime, VOCAB_SIZE, b, opt.cuda)
-            #print(z_tilde)
-
-            loss = gen_gan_loss(prob, targets, rewards)
-            gen_gan_optm.zero_grad()
-            loss.backward()
-            gen_gan_optm.step()
+            if GRADIENT_ESTIMATOR == 'RELAX':
+                prob = Variable(torch.zeros((BATCH_SIZE*g_sequence_len, VOCAB_SIZE)))
+                if opt.cuda:
+                    prob = prob.cuda()
+                for n in range(n_samples):
+                    samples = generator.sample(BATCH_SIZE, g_sequence_len)
+                    # construct the input to the generator, add zeros before samples and delete the last column
+                    zeros = torch.zeros((BATCH_SIZE, 1)).type(torch.LongTensor)
+                    if samples.is_cuda:
+                        zeros = zeros.cuda()
+                    inputs = Variable(torch.cat([zeros, samples.data], dim = 1)[:, :-1].contiguous())
+                    prob += generator.forward(inputs)
+                prob /= n_samples
+                # 3.a
+                theta_prime = g_output_prob(prob, BATCH_SIZE, g_sequence_len)
+                # 3.b
+                z = gumbel_softmax(theta_prime, VOCAB_SIZE, opt.cuda)
+                # 3.c
+                value, b = torch.max(z, 0)
+                # 3.d
+                z_tilde = categorical_re_param(theta_prime, VOCAB_SIZE, b, opt.cuda)
 
         if total_batch % 1 == 0 or total_batch == TOTAL_BATCH - 1:
             generate_samples(generator, BATCH_SIZE, GENERATED_NUM, EVAL_FILE)
             eval_iter = GenDataIter(EVAL_FILE, BATCH_SIZE)
             loss = eval_epoch(target_lstm, eval_iter, gen_criterion)
             print('Batch [%d] True Loss: %f' % (total_batch, loss))
-        rollout.update_params()
+        if GRADIENT_ESTIMATOR == 'REINFORCE':
+            rollout.update_params()
         
         for _ in range(D_STEPS):
             generate_samples(generator, BATCH_SIZE, GENERATED_NUM, NEGATIVE_FILE)
