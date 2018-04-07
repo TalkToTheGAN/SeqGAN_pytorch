@@ -78,7 +78,7 @@ d_dropout = 0.75
 d_num_class = 2
 d_lstm_hidden_dim = 32
 DEFAULT_ETA = 1             #for REBAR only. Note: Naive value, in paper they estimate value
-DEFAULT_TEMPERATURE = 0.10
+DEFAULT_TEMPERATURE = 0.9
 # Annex network parameters
 c_filter_sizes = [1, 3, 5, 7, 9, 15]
 c_num_filters = [100, 200, 200, 200, 100, 100]
@@ -94,7 +94,9 @@ def main(opt):
     if visualize:
         pretrain_G_score_logger = VisdomPlotLogger('line', opts={'title': 'Pre-train G Goodness Score'})
         pretrain_D_loss_logger = VisdomPlotLogger('line', opts={'title': 'Pre-train D Loss'})
-        adversarial_G_score_logger = VisdomPlotLogger('line', opts={'title': 'Adversarial Batch G Goodness Score'})
+        adversarial_G_score_logger = VisdomPlotLogger('line', opts={'title': f'Adversarial G {GD} Goodness Score',
+                                                      'Y': '{0, 13}', 'X': '{0, TOTAL_BATCH}' })
+        G_text_logger = VisdomTextLogger(update_type='APPEND')
         adversarial_D_loss_logger = VisdomPlotLogger('line', opts={'title': 'Adversarial Batch D Loss'})
 
     # Define Networks
@@ -328,6 +330,7 @@ def main(opt):
                 print('Batch [%d] KL Score: %f' % (total_batch, kl_score))
                 print('Epoch [{}] Character distribution: {}'.format(total_batch, list(freq_score)))
                 if visualize:
+                    [G_text_logger.log(line) for line in generated_string]
                     adversarial_G_score_logger.log(total_batch, eval_score)
 
 		# Train the discriminator
@@ -368,7 +371,7 @@ if __name__ == '__main__':
         from visdom import Visdom
         import torchnet as tnt
         from torchnet.engine import Engine
-        from torchnet.logger import VisdomPlotLogger, VisdomLogger
+        from torchnet.logger import VisdomPlotLogger, VisdomTextLogger, VisdomLogger
         canVisualize = True
     except ImportError as ie:
         eprint("Could not import vizualization imports. ")

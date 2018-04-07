@@ -30,7 +30,7 @@ from main import GENERATED_NUM, g_sequence_len, BATCH_SIZE, VOCAB_SIZE
 def eprint(*args, **kwargs):
     print(*args, file=sys.stderr, **kwargs)
 
-def generate_samples(model, batch_size, generated_num, output_file):
+def generate_samples(model, batch_size, generated_num, output_file, cuda=False):
     samples = []
     for _ in range(int(generated_num / batch_size)):
         sample = model.sample(batch_size, g_sequence_len).cpu().data.numpy().tolist()
@@ -39,7 +39,10 @@ def generate_samples(model, batch_size, generated_num, output_file):
         for sample in samples:
             string = ' '.join([str(s) for s in sample])
             fout.write('%s\n' % string)
-    return Variable(torch.LongTensor(samples[0:batch_size]))
+    gen_samples = Variable(torch.LongTensor(samples[0:batch_size]))
+    if cuda:
+        gen_samples = gen_samples.cuda()
+    return gen_samples
 
 def train_epoch(model, data_iter, criterion, optimizer, PRE_EPOCH_GEN, epoch, cuda=False):
     total_loss = 0.
